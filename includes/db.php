@@ -4,7 +4,7 @@ function getDB(): PDO {
     if ($pdo === null) {
         try {
             $pdo = new PDO(
-                'mysql:host=localhost;dbname=pastimes_db;charset=utf8mb4',
+                'mysql:host=127.0.0.1;dbname=pastimes_db;charset=utf8mb4',
                 'root',
                 '',
                 [
