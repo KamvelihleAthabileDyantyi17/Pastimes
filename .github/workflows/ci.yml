@@ -1,0 +1,238 @@
+name: Pastimes CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # ── Job 1: PHP Syntax Check ─────────────────────────────────────────────
+  php-lint:
+    name: PHP Syntax Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: php-cs-fixer
+
+      - name: Check PHP syntax (all .php files)
+        run: |
+          echo "🔍 Checking PHP syntax..."
+          find . -name "*.php" -not -path "./.git/*" | while read file; do
+            php -l "$file"
+            if [ $? -ne 0 ]; then
+              echo "❌ Syntax error in: $file"
+              exit 1
+            fi
+          done
+          echo "✅ All PHP files passed syntax check."
+
+  # ── Job 2: Database Schema Validation ───────────────────────────────────
+  database:
+    name: Database Schema Test
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mariadb:10.4
+        env:
+          MARIADB_ROOT_PASSWORD: ''
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: 'yes'
+          MARIADB_DATABASE: pastimes_db
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for MariaDB to be ready
+        run: |
+          echo "⏳ Waiting for MariaDB..."
+          until mysqladmin ping -h 127.0.0.1 --silent; do
+            sleep 2
+          done
+          echo "✅ MariaDB is ready."
+
+      - name: Run schema creation
+        run: |
+          echo "🗃️ Creating tables..."
+          mysql -h 127.0.0.1 -u root pastimes_db <<'SQL'
+            CREATE TABLE IF NOT EXISTS Users (
+              user_id INT PRIMARY KEY AUTO_INCREMENT,
+              username VARCHAR(50) UNIQUE NOT NULL,
+              email VARCHAR(100) UNIQUE NOT NULL,
+              password_hash VARCHAR(255) NOT NULL,
+              role ENUM('user','admin') DEFAULT 'user',
+              status ENUM('Active','Banned','Suspended') DEFAULT 'Active',
+              date_joined DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS Categories (
+              category_id INT PRIMARY KEY AUTO_INCREMENT,
+              category_name VARCHAR(50) NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS Products (
+              product_id INT PRIMARY KEY AUTO_INCREMENT,
+              user_id INT NOT NULL,
+              category_id INT NOT NULL,
+              title VARCHAR(100) NOT NULL,
+              description TEXT,
+              price DECIMAL(10,2) NOT NULL,
+              image_path VARCHAR(255),
+              condition_label ENUM('New','Like New','Good','Fair','Worn') NOT NULL,
+              status ENUM('Available','Sold','Traded') DEFAULT 'Available',
+              date_listed DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+              FOREIGN KEY (category_id) REFERENCES Categories(category_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS Trades (
+              trade_id INT PRIMARY KEY AUTO_INCREMENT,
+              initiator_user_id INT NOT NULL,
+              receiver_user_id INT NOT NULL,
+              offered_product_id INT NOT NULL,
+              requested_product_id INT NOT NULL,
+              trade_status ENUM('Pending','Accepted','Declined') DEFAULT 'Pending',
+              date_proposed DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (initiator_user_id) REFERENCES Users(user_id),
+              FOREIGN KEY (receiver_user_id) REFERENCES Users(user_id),
+              FOREIGN KEY (offered_product_id) REFERENCES Products(product_id),
+              FOREIGN KEY (requested_product_id) REFERENCES Products(product_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS Cart (
+              cart_id INT PRIMARY KEY AUTO_INCREMENT,
+              user_id INT NOT NULL,
+              product_id INT NOT NULL,
+              date_added DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+              FOREIGN KEY (product_id) REFERENCES Products(product_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS Orders (
+              order_id INT PRIMARY KEY AUTO_INCREMENT,
+              buyer_user_id INT NOT NULL,
+              product_id INT NOT NULL,
+              order_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+              status ENUM('Pending','Completed') DEFAULT 'Completed',
+              FOREIGN KEY (buyer_user_id) REFERENCES Users(user_id),
+              FOREIGN KEY (product_id) REFERENCES Products(product_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS Notifications (
+              notification_id INT PRIMARY KEY AUTO_INCREMENT,
+              user_id INT NOT NULL,
+              message VARCHAR(255) NOT NULL,
+              is_read BOOLEAN DEFAULT 0,
+              date_created DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE
+            );
+
+            INSERT INTO Categories (category_name) VALUES
+              ('Vintage'),('Shoes'),('Clothing'),('Electronics'),('Accessories'),('Other');
+          SQL
+          echo "✅ Schema created successfully."
+
+      - name: Verify all 7 tables exist
+        run: |
+          echo "🔎 Verifying tables..."
+          TABLES=$(mysql -h 127.0.0.1 -u root pastimes_db -e "SHOW TABLES;" --silent)
+          for table in Users Categories Products Trades Cart Orders Notifications; do
+            if echo "$TABLES" | grep -iq "$table"; then
+              echo "  ✅ $table"
+            else
+              echo "  ❌ MISSING: $table"
+              exit 1
+            fi
+          done
+          echo "✅ All 7 tables verified."
+
+      - name: Verify categories were seeded
+        run: |
+          COUNT=$(mysql -h 127.0.0.1 -u root pastimes_db -e "SELECT COUNT(*) FROM Categories;" --silent)
+          echo "Categories seeded: $COUNT"
+          if [ "$COUNT" -ne 6 ]; then
+            echo "❌ Expected 6 categories, got $COUNT"
+            exit 1
+          fi
+          echo "✅ Seed data verified."
+
+  # ── Job 3: Project Structure Check ──────────────────────────────────────
+  structure:
+    name: Project Structure Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify required files exist
+        run: |
+          echo "📁 Checking project structure..."
+          REQUIRED=(
+            "index.php"
+            "register.php"
+            "login.php"
+            "logout.php"
+            "catalog.php"
+            "item.php"
+            "add_listing.php"
+            "dashboard.php"
+            "cart.php"
+            "admin.php"
+            "includes/db.php"
+            "includes/auth.php"
+            "includes/functions.php"
+            "includes/header.php"
+            "includes/footer.php"
+            "process/register_process.php"
+            "process/login_process.php"
+            "process/add_listing_process.php"
+            "process/trade_process.php"
+            "process/cart_process.php"
+            "process/checkout_process.php"
+            "process/admin_process.php"
+            "process/profile_process.php"
+            "css/style.css"
+            "js/validation.js"
+            "js/trade-modal.js"
+          )
+
+          ALL_OK=true
+          for file in "${REQUIRED[@]}"; do
+            if [ -f "$file" ]; then
+              echo "  ✅ $file"
+            else
+              echo "  ❌ MISSING: $file"
+              ALL_OK=false
+            fi
+          done
+
+          if [ "$ALL_OK" = false ]; then
+            echo "❌ Some required files are missing."
+            exit 1
+          fi
+          echo "✅ All required files present."
+
+      - name: Check uploads directory exists
+        run: |
+          if [ -d "uploads" ]; then
+            echo "✅ uploads/ directory exists."
+          else
+            echo "❌ uploads/ directory is missing."
+            exit 1
+          fi
